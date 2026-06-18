@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Game: จำแนกสัตว์ ป.4 (ฉบับโปร 300+ ชนิด)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MediaPipe Libraries สำหรับ AR Hand Tracking -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <!-- Tone.js สำหรับระบบเสียงดนตรี 8-bit -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #0f172a; font-family: 'Sarabun', sans-serif; }
+        #app-container { position: relative; width: 100vw; height: 100vh; }
+        video { display: none; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; cursor: crosshair; }
+        .glass-panel { background: rgba(15, 23, 42, 0.75); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.2); box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37); }
+        .hidden { display: none !important; }
+        @keyframes pulse-glow {
+            0% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.7); }
+            70% { box-shadow: 0 0 0 20px rgba(34, 211, 238, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0); }
+        }
+        .btn-start { animation: pulse-glow 2s infinite; }
+    </style>
+</head>
+<body>
+
+<div id="app-container">
+    <video id="webcam" autoplay playsinline muted allow="camera"></video>
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- หน้าจอเริ่มต้น -->
+    <div id="startUI" class="absolute inset-0 z-20 flex items-center justify-center p-4 transition-opacity duration-500">
+        <div class="glass-panel p-8 md:p-12 rounded-3xl text-center max-w-lg text-white">
+            <div class="text-6xl mb-4 animate-bounce">🦖🦑🦅</div>
+            <h1 class="text-4xl font-extrabold mb-4 tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-emerald-400 leading-tight">
+                สุดยอดนักจำแนกสัตว์<br>ป.4 ท้าความไว!
+            </h1>
+            <p class="text-lg mb-8 text-slate-200">
+                พบกับสัตว์กว่า <b>300 ชนิด</b>! หยิบสัตว์ที่ใช่ใส่กล่องให้ถูก ระวัง <b>"ตัวลวง"</b> ที่ไม่เข้าพวก อย่าเผลอหยิบใส่กล่องเด็ดขาด! แข่งกับเวลา 60 วินาที
+            </p>
+            <button onclick="startGame()" class="btn-start bg-gradient-to-r from-emerald-500 to-cyan-600 hover:from-emerald-600 hover:to-cyan-700 text-white font-bold px-10 py-4 rounded-full text-2xl transform hover:scale-105 transition active:scale-95 w-full">
+                🎮 เริ่มตะลุยด่าน!
+            </button>
+            <p class="mt-4 text-sm text-slate-300">ระบบ AR พร้อมเสียงเพลง 🔊</p>
+        </div>
+    </div>
+
+    <!-- หน้าจอโหลด -->
+    <div id="loadingUI" class="hidden absolute inset-0 z-20 flex flex-col items-center justify-center p-4 bg-slate-900/90 backdrop-blur-sm">
+        <div class="w-20 h-20 border-8 border-emerald-400 border-t-transparent rounded-full animate-spin mb-6"></div>
+        <h2 class="text-3xl font-bold text-white tracking-wider animate-pulse">กำลังโหลดระบบ AR...</h2>
+        <p class="text-emerald-200 mt-2 text-lg">กรุณาอนุญาตการเข้าถึงกล้อง</p>
+    </div>
+</div>
+
+<script>
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    const startUI = document.getElementById('startUI');
+    const loadingUI = document.getElementById('loadingUI');
+
+    let gameState = 'start'; 
+    let score = 0;
+    let currentLevel = 0;
+    let handDetected = false;
+    let lastHandTime = 0;
+    
+    let cursor = { x: 0, y: 0, pinching: false, wasPinching: false, state: 'normal' };
+    let mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2, isMouseDown = false;
+    let draggedCard = null;
+    let levelTransitionTimer = 0;
+    let levelBonus = 0;
+
+    const TIME_LIMIT_SECONDS = 60; 
+    let timeLeft = TIME_LIMIT_SECONDS;
+    let lastFrameTimeMs = 0;
+
+    let bgmSynth, sfxSynth;
+
+    async function initAudio() {
+        await Tone.start();
+        bgmSynth = new Tone.PolySynth(Tone.Synth, {
+            oscillator: { type: "square" }, envelope: { attack: 0.05, decay: 0.2, sustain: 0.2, release: 1 }
+        }).toDestination();
+        bgmSynth.volume.value = -12; 
+
+        sfxSynth = new Tone.Synth({
+            oscillator: { type: "triangle" }, envelope: { attack: 0.01, decay: 0.1, sustain: 0.1, release: 0.5 }
+        }).toDestination();
+        sfxSynth.volume.value = -5;
+
+        const notes = ["C4", "E4", "G4", "C5", "G4", "E4", "D4", "F4", "A4", "D5", "A4", "F4"];
+        let step = 0;
+        
+        Tone.Transport.scheduleRepeat((time) => {
+            if (gameState === 'playing' && levelTransitionTimer === 0) {
+                let note = notes[step % notes.length];
+                if (step % 4 !== 3) bgmSynth.triggerAttackRelease(note, "16n", time);
+            }
+            step++;
+        }, "8n");
+        Tone.Transport.bpm.value = 140; 
+        Tone.Transport.start();
+    }
+
+    function playSfxGrab() { if(sfxSynth) sfxSynth.triggerAttackRelease("C6", "32n"); }
+    function playSfxTick() { if(sfxSynth) sfxSynth.triggerAttackRelease("A6", "64n"); }
+    function playSfxCorrect() {
+        if(sfxSynth) {
+            const now = Tone.now();
+            sfxSynth.triggerAttackRelease("E5", "8n", now);
+            sfxSynth.triggerAttackRelease("G5", "8n", now + 0.1);
+            sfxSynth.triggerAttackRelease("C6", "4n", now + 0.2);
+        }
+    }
+    function playSfxWrong() {
+        if(sfxSynth) {
+            const now = Tone.now();
+            sfxSynth.triggerAttackRelease("D3", "8n", now);
+            sfxSynth.triggerAttackRelease("C3", "8n", now + 0.15);
+        }
+    }
+    function playSfxWin() {
+        if(bgmSynth) {
+            const now = Tone.now();
+            bgmSynth.triggerAttackRelease(["C4", "E4", "G4"], "4n", now);
+            bgmSynth.triggerAttackRelease(["F4", "A4", "C5"], "4n", now + 0.3);
+            bgmSynth.triggerAttackRelease(["G4", "B4", "D5"], "4n", now + 0.6);
+            bgmSynth.triggerAttackRelease(["C5", "E5", "G5"], "2n", now + 0.9);
+        }
+    }
+    function playSfxGameOver() {
+        if(bgmSynth) {
+            const now = Tone.now();
+            bgmSynth.triggerAttackRelease(["C3", "Eb3"], "4n", now);
+            bgmSynth.triggerAttackRelease(["G2", "B2"], "2n", now + 0.4);
+        }
+    }
+
+    // --- ฐานข้อมูลสัตว์ 300+ ชนิด ---
+    const categoryInfo = {
+        'mammal': { id: 'mammal', name: 'เลี้ยงลูกด้วยนม', color: '#ec4899', icon: '🍼' },
+        'bird': { id: 'bird', name: 'สัตว์ปีก', color: '#3b82f6', icon: '🪶' },
+        'reptile': { id: 'reptile', name: 'เลื้อยคลาน', color: '#eab308', icon: '🦎' },
+        'amphibian': { id: 'amphibian', name: 'สะเทินน้ำสะเทินบก', color: '#22c55e', icon: '🐸' },
+        'fish': { id: 'fish', name: 'กลุ่มปลา', color: '#0ea5e9', icon: '🐟' }
+        // invertebrate ไม่มีกล่อง ไว้เป็นตัวลวงเท่านั้น
+    };
+
+    const rawAnimalData = [
+        // สัตว์เลี้ยงลูกด้วยนม (Mammals)
+        "🐕|สุนัข|mammal", "🐈|แมว|mammal", "🐘|ช้าง|mammal", "🐎|ม้า|mammal", "🐄|วัว|mammal", "🐃|ควาย|mammal", "🐖|หมู|mammal", "🐑|แกะ|mammal", "🐐|แพะ|mammal", "🐒|ลิง|mammal",
+        "🦇|ค้างคาว|mammal", "🐳|วาฬ|mammal", "🐬|โลมา|mammal", "🦭|แมวน้ำ|mammal", "🦁|สิงโต|mammal", "🐅|เสือ|mammal", "🐻|หมี|mammal", "🐼|แพนด้า|mammal", "🐨|โคอาลา|mammal", "🦘|จิงโจ้|mammal",
+        "🐇|กระต่าย|mammal", "🐁|หนู|mammal", "🐿️|กระรอก|mammal", "🦔|เม่น|mammal", "🦒|ยีราฟ|mammal", "🦓|ม้าลาย|mammal", "🦛|ฮิปโป|mammal", "🦏|แรด|mammal", "🐪|อูฐ|mammal", "🦌|กวาง|mammal",
+        "🦙|อัลปาก้า|mammal", "🦊|จิ้งจอก|mammal", "🐺|หมาป่า|mammal", "🐆|เสือดาว|mammal", "🦍|กอริลลา|mammal", "🦧|อุรังอุตัง|mammal", "🦥|สลอธ|mammal", "🦦|นาก|mammal", "🦫|บีเวอร์|mammal", "🦨|สกั๊งค์|mammal",
+        "🦡|แบดเจอร์|mammal", "🐗|หมูป่า|mammal", "🐾|ชะนี|mammal", "🐾|พังพอน|mammal", "🐾|เมียร์แคต|mammal", "🐾|ตัวกินมด|mammal", "🐾|ไฮยีน่า|mammal", "🐾|ชีตาห์|mammal", "🐾|ชิมแปนซี|mammal", "🐾|ลีเมอร์|mammal",
+        "🐾|อาร์มาดิลโล|mammal", "🐾|คาปิบารา|mammal", "🐾|แฮมสเตอร์|mammal", "🐾|วอลรัส|mammal", "🐾|สิงโตทะเล|mammal", "🐾|นาร์วาฬ|mammal", "🐾|เบลูกา|mammal", "🐾|กวางมูส|mammal", "🐾|แรคคูน|mammal", "🐾|พะยูน|mammal",
+        
+        // สัตว์ปีก (Birds)
+        "🦜|นกแก้ว|bird", "🐔|ไก่|bird", "🦆|เป็ด|bird", "🦢|ห่าน|bird", "🐧|เพนกวิน|bird", "🦚|นกยูง|bird", "🦉|นกฮูก|bird", "🦅|อินทรี|bird", "🕊️|นกพิราบ|bird", "🦩|ฟลามิงโก|bird",
+        "🦤|นกโดโด้|bird", "🦃|ไก่งวง|bird", "🐦|นกกระจอก|bird", "🐦|นกเอี้ยง|bird", "🐦|นกขุนทอง|bird", "🐦|นกเขา|bird", "🐦|นกนางนวล|bird", "🐦|นกเงือก|bird", "🐦|นกกระยาง|bird", "🐦|นกกระสา|bird",
+        "🐦|นกกีวี|bird", "🐦|นกอีมู|bird", "🐦|คาสโซวารี|bird", "🐦|ฮัมมิ่งเบิร์ด|bird", "🐦|นกหัวขวาน|bird", "🐦|นกกระจาบ|bird", "🐦|นกกระจิบ|bird", "🐦|นางแอ่น|bird", "🐦|เป็ดน้ำ|bird", "🐦|ไก่ฟ้า|bird",
+        "🐦|นกกระทา|bird", "🐦|นกกระทุง|bird", "🐦|เหยี่ยว|bird", "🐦|นกแร้ง|bird", "🐦|เค้าแมว|bird", "🐦|นกกระเรียน|bird", "🐦|พัฟฟิน|bird", "🐦|ทูแคน|bird", "🐦|มาคอว์|bird", "🐦|กระตั้ว|bird",
+        "🐦|ค็อกคาเทล|bird", "🐦|เลิฟเบิร์ด|bird", "🐦|ฟินช์|bird", "🐦|คานารี|bird", "🐦|หงส์หยก|bird", "🐦|นกช้อนหอย|bird", "🐦|นกอ้ายงั่ว|bird", "🐦|นกปากห่าง|bird", "🐦|ไก่นา|bird", "🐦|เป็ดแมนดาริน|bird",
+        "🐦|หงส์|bird", "🐦|หงส์ดำ|bird", "🐦|อีกา|bird", "🐦|กา|bird", "🐦|นกกระจอกเทศ|bird",
+
+        // สัตว์เลื้อยคลาน (Reptiles)
+        "🐍|งู|reptile", "🐢|เต่า|reptile", "🐊|จระเข้|reptile", "🦎|กิ้งก่า|reptile", "🦎|ตุ๊กแก|reptile", "🦎|จิ้งจก|reptile", "🦎|อีกัวน่า|reptile", "🦎|คามิเลียน|reptile", "🐢|เต่าตะพาบ|reptile", "🐢|เต่าตนุ|reptile",
+        "🐢|มะเฟือง|reptile", "🐢|เต่ากระ|reptile", "🐢|เต่าบก|reptile", "🐍|งูเหลือม|reptile", "🐍|งูหลาม|reptile", "🐍|งูเห่า|reptile", "🐍|งูจงอาง|reptile", "🐍|งูเขียว|reptile", "🐍|หางกระดิ่ง|reptile", "🐍|อนาคอนด้า|reptile",
+        "🦎|ตะกวด|reptile", "🦎|เหี้ย|reptile", "🦎|มังกรโคโมโด|reptile", "🦎|จิ้งเหลน|reptile", "🐊|แอลลิเกเตอร์|reptile", "🐊|ไคแมน|reptile", "🦎|กิ้งก่าบิน|reptile", "🦎|ตุ๊กแกป่า|reptile", "🦎|จิ้งจกดิน|reptile", "🐍|งูดิน|reptile",
+        "🐍|งูน้ำ|reptile", "🐍|งูทะเล|reptile", "🐢|เต่าญี่ปุ่น|reptile", "🐢|ซูคาต้า|reptile", "🐢|เต่าดาว|reptile", "🦎|หนาม|reptile", "🦎|ทะเลทราย|reptile", "🦎|กิ้งก่ามังกร|reptile", "🐍|งูแมวเซา|reptile", "🐍|งูกะปะ|reptile",
+        "🐍|เขียวหางไหม้|reptile", "🐍|งูสิง|reptile", "🐍|แสงอาทิตย์|reptile", "🐍|งูสายม่าน|reptile", "🐢|เต่าหับ|reptile", "🐢|เต่านา|reptile", "🐢|ตะพาบน้ำ|reptile", "🦎|มังกรเครา|reptile", "🐊|ตะขบ|reptile", "🐊|น้ำเค็ม|reptile",
+
+        // สัตว์สะเทินน้ำสะเทินบก (Amphibians)
+        "🐸|กบ|amphibian", "🐸|คางคก|amphibian", "🐸|อึ่งอ่าง|amphibian", "🐸|ปาด|amphibian", "🦎|ซาลาแมนเดอร์|amphibian", "🦎|นิวต์|amphibian", "🐸|เขียด|amphibian", "🐸|จงโคร่ง|amphibian", "🐸|กบต้นไม้|amphibian", "🐸|กบพิษ|amphibian",
+        "🐸|กบแก้ว|amphibian", "🐸|กบโกไลแอท|amphibian", "🐸|กบภูเขา|amphibian", "🐸|คางคกหาง|amphibian", "🐸|คางคกต้นไม้|amphibian", "🐸|อึ่งทราย|amphibian", "🐸|อึ่งแม่หนาว|amphibian", "🐸|ปาดป่า|amphibian", "🐸|ปาดบ้าน|amphibian", "🦎|ซาลาแมนเดอร์ยักษ์|amphibian",
+        "🦎|นิวต์ท้องแดง|amphibian", "🐍|เขียดงู|amphibian", "🐸|กบนา|amphibian", "🐸|กบทูด|amphibian", "🐸|กบจาน|amphibian", "🐸|กบหนอง|amphibian", "🐸|คางคกบ้าน|amphibian", "🐸|คางคกไฟ|amphibian", "🐸|เขียดตะปาด|amphibian", "🐸|เขียดทราย|amphibian",
+        "🐸|อึ่งผี|amphibian", "🐸|อึ่งกราย|amphibian", "🦎|ซาลาแมนเดอร์ถ้ำ|amphibian", "🐸|กบบิน|amphibian", "🐸|กบมะเขือเทศ|amphibian", "🐸|กบดาร์วิน|amphibian", "🐸|กบมีเขา|amphibian", "🐸|ซูรินาม|amphibian", "🦎|นิวต์หงอน|amphibian", "🦎|ซาลาเสือ|amphibian",
+        "🦎|ซาลาไฟ|amphibian", "🐸|ซ่อนแอบ|amphibian", "🐸|กบปลอมตัว|amphibian", "🐸|อึ่งน้ำเต้า|amphibian", "🐸|ปาดเขียว|amphibian", "🐸|ปากกว้าง|amphibian", "🐸|กบทรงเครื่อง|amphibian", "🐸|ลายหินอ่อน|amphibian", "🐸|อึ่งลาย|amphibian", "🦎|นิวต์อิกัวน่า|amphibian",
+
+        // ปลา (Fish)
+        "🐠|ปลาทอง|fish", "🦈|ฉลาม|fish", "🪼|กระเบน|fish", "🐟|ปลาคาร์พ|fish", "🐟|ปลานิล|fish", "🐟|ปลาทู|fish", "🐟|แซลมอน|fish", "🐟|ทูน่า|fish", "🐟|ปลาดุก|fish", "🐟|ปลาช่อน|fish",
+        "🐟|ปลากัด|fish", "🐟|หางนกยูง|fish", "🐟|ปลาหมอสี|fish", "🐟|ตะเพียน|fish", "🐟|ปลาไหล|fish", "🐟|ปลากะพง|fish", "🐟|ปลาเก๋า|fish", "🐟|ปลาอินทรี|fish", "🐟|ปลาหมอ|fish", "🐡|ปลาปักเป้า|fish",
+        "🦈|ฉลามวาฬ|fish", "🪼|กระเบนราหู|fish", "🐟|ม้าน้ำ|fish", "🐠|ปลาการ์ตูน|fish", "🐠|บลูแทงค์|fish", "🐠|สินสมุทร|fish", "🐠|ผีเสื้อ|fish", "🐠|ปลาสิงโต|fish", "🐟|ปลาหิน|fish", "🐟|ปลาตีน|fish",
+        "🐟|ปลาปอด|fish", "🦈|ฉลามขาว|fish", "🦈|หัวค้อน|fish", "🦈|ฉลามเสือ|fish", "🐟|สเตอร์เจียน|fish", "🐟|ซาร์ดีน|fish", "🐟|แอนโชวี่|fish", "🐟|ปลาคอด|fish", "🐟|แฮร์ริ่ง|fish", "🐟|เทราต์|fish",
+        "🐟|ปลาชะโด|fish", "🐟|เนื้ออ่อน|fish", "🐟|ปลาสวาย|fish", "🐟|ปลาบึก|fish", "🐟|ปลากด|fish", "🐟|ปลาหลด|fish", "🐟|ปลาหมู|fish", "🐟|เสือตอ|fish", "🐟|อโรวาน่า|fish", "🐟|ปลาเทวดา|fish",
+
+        // สัตว์ไม่มีกระดูกสันหลัง - ทำหน้าที่เป็น "ตัวลวง" (Invertebrates / Decoys)
+        "🕷️|แมงมุม|invertebrate", "🐜|มด|invertebrate", "🦋|ผีเสื้อ|invertebrate", "🪳|แมลงสาบ|invertebrate", "🦟|ยุง|invertebrate", "🪰|แมลงวัน|invertebrate", "🐝|ผึ้ง|invertebrate", "🐝|ต่อ|invertebrate", "🐝|แตน|invertebrate", "🪲|ด้วง|invertebrate",
+        "🦗|ตั๊กแตน|invertebrate", "🦗|แมลงปอ|invertebrate", "🐌|หอยทาก|invertebrate", "🦪|หอยนางรม|invertebrate", "🦪|หอยแครง|invertebrate", "🦪|แมลงภู่|invertebrate", "🦑|หมึกกล้วย|invertebrate", "🐙|หมึกยักษ์|invertebrate", "🦑|หมึกสาย|invertebrate", "🪼|แมงกะพรุน|invertebrate",
+        "🪸|ปะการัง|invertebrate", "🧽|ฟองน้ำ|invertebrate", "⭐|ดาวทะเล|invertebrate", "🥒|ปลิงทะเล|invertebrate", "🦔|หอยเม่น|invertebrate", "🪱|พยาธิ|invertebrate", "🪱|ไส้เดือน|invertebrate", "🪱|ปลิง|invertebrate", "🦐|กุ้ง|invertebrate", "🦀|ปู|invertebrate",
+        "🦐|กั้ง|invertebrate", "🦀|แมงดาทะเล|invertebrate", "🐛|ตะขาบ|invertebrate", "🐛|กิ้งกือ|invertebrate", "🦂|แมงป่อง|invertebrate", "🕷️|เห็บ|invertebrate", "🕷️|หมัด|invertebrate", "🕷️|ไร|invertebrate", "🦋|ชีปะขาว|invertebrate", "🐜|แมลงช้าง|invertebrate",
+        "🕷️|จิงโจ้น้ำ|invertebrate", "🐌|หอยขม|invertebrate", "🐌|หอยเชอรี่|invertebrate", "🦑|หมึกกระดอง|invertebrate", "🪼|กะพรุนไฟ|invertebrate", "🪸|ดอกไม้ทะเล|invertebrate", "🪸|ปากกาทะเล|invertebrate", "🐌|ทากหมู|invertebrate", "🐌|ทากเปลือย|invertebrate", "🪱|แม่เพรียง|invertebrate"
+    ];
+
+    const animalDatabase = rawAnimalData.map(str => {
+        const [emoji, name, type] = str.split('|');
+        return { emoji, name, type };
+    });
+
+    let cards = [];
+    let boxes = [];
+    let instructionBtn = { x: 0, y: 0, w: 240, h: 70 };
+    let restartBtn = { x: 0, y: 0, w: 220, h: 70 };
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function setupLevel(lvlIdx) {
+        currentLevel = lvlIdx;
+        draggedCard = null;
+        levelBonus = 0;
+        timeLeft = TIME_LIMIT_SECONDS;
+        lastFrameTimeMs = Date.now();
+
+        // 1. คำนวณความยาก
+        const numBoxes = Math.min(5, 2 + Math.floor(lvlIdx / 3)); // เพิ่มกล่องทุกๆ 3 ด่าน (สูงสุด 5 กล่อง)
+        const numCorrect = Math.min(15, 4 + (lvlIdx * 2));        // จำนวนสัตว์ที่ถูกต้อง เพิ่มด่านละ 2 (สูงสุด 15)
+        const numDecoys = Math.min(10, 1 + Math.floor(lvlIdx * 1.5)); // จำนวนตัวลวง (สูงสุด 10)
+
+        // 2. สุ่มเลือกหมวดหมู่ที่จะเล่นในด่านนี้
+        let availableCats = Object.keys(categoryInfo);
+        availableCats.sort(() => Math.random() - 0.5);
+        let selectedCats = availableCats.slice(0, numBoxes);
+
+        // 3. สร้างกล่อง
+        boxes = [];
+        const boxW = Math.min(220, (canvas.width - 20) / numBoxes - 10);
+        const boxH = 170;
+        const gap = 15;
+        const totalBoxesW = (numBoxes * boxW) + ((numBoxes - 1) * gap);
+        const startBoxX = (canvas.width - totalBoxesW) / 2;
+
+        selectedCats.forEach((catId, i) => {
+            const cat = categoryInfo[catId];
+            boxes.push({
+                id: cat.id, name: cat.name, color: cat.color, icon: cat.icon,
+                x: startBoxX + i * (boxW + gap), y: canvas.height - boxH - 30,
+                w: boxW, h: boxH, containedAnimals: []
+            });
+        });
+
+        // 4. สุ่มสัตว์ที่ถูกต้อง (ต้องอยู่ในหมวดหมู่ที่ถูกเลือก)
+        let correctPool = animalDatabase.filter(a => selectedCats.includes(a.type));
+        correctPool.sort(() => Math.random() - 0.5);
+        let levelCorrectAnimals = correctPool.slice(0, numCorrect).map(a => ({...a, isDecoy: false}));
+
+        // 5. สุ่มสัตว์ตัวลวง (ไม่อยู่ในหมวดหมู่ที่ถูกเลือกเลย หรือเป็น invertebrate)
+        let decoyPool = animalDatabase.filter(a => !selectedCats.includes(a.type));
+        decoyPool.sort(() => Math.random() - 0.5);
+        let levelDecoyAnimals = decoyPool.slice(0, numDecoys).map(a => ({...a, isDecoy: true}));
+
+        // 6. รวมและสลับตำแหน่ง
+        let levelAnimals = [...levelCorrectAnimals, ...levelDecoyAnimals];
+        levelAnimals.sort(() => Math.random() - 0.5);
+
+        // 7. สร้างการ์ดบนจอ
+        cards = [];
+        const areaW = canvas.width * 0.85;
+        const areaH = canvas.height * 0.45;
+        const startX = (canvas.width - areaW) / 2;
+        const startY = 130;
+
+        // ปรับขนาดการ์ดตามจำนวน ถ้าการ์ดเยอะให้เล็กลงหน่อย
+        const baseScale = Math.max(0.65, 1 - (levelAnimals.length * 0.015));
+
+        levelAnimals.forEach((animal) => {
+            const spawnX = startX + Math.random() * (areaW - 100);
+            const spawnY = startY + Math.random() * (areaH - 120);
+            
+            cards.push({
+                name: animal.name, emoji: animal.emoji, catId: animal.type, isDecoy: animal.isDecoy,
+                x: spawnX, y: spawnY, homeX: spawnX, homeY: spawnY,
+                w: 100, h: 120, isPlaced: false, scale: baseScale, targetScale: baseScale, shakeTimer: 0,
+                baseScale: baseScale
+            });
+        });
+    }
+
+    async function startGame() {
+        await initAudio(); 
+        startUI.classList.add('hidden');
+        loadingUI.classList.remove('hidden');
+        gameState = 'loading';
+        
+        try {
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+            hands.setOptions({
+                maxNumHands: 1, modelComplexity: 1,
+                minDetectionConfidence: 0.6, minTrackingConfidence: 0.6
+            });
+            hands.onResults(onHandResults);
+
+            const camera = new Camera(video, {
+                onFrame: async () => {
+                    await hands.send({ image: video });
+                    if (gameState === 'loading') {
+                        loadingUI.classList.add('hidden');
+                        gameState = 'instructions';
+                    }
+                },
+                width: 1280, height: 720
+            });
+            await camera.start();
+            requestAnimationFrame(drawLoop);
+        } catch (error) {
+            console.error("Camera error:", error);
+            alert("⚠️ ไม่สามารถเข้าถึงกล้องได้ ระบบจะใช้โหมดเมาส์แทนครับ");
+            loadingUI.classList.add('hidden');
+            gameState = 'instructions';
+            requestAnimationFrame(drawLoop);
+        }
+    }
+
+    function onHandResults(results) {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            handDetected = true;
+            lastHandTime = Date.now();
+            
+            const landmarks = results.multiHandLandmarks[0];
+            const indexFingerTip = landmarks[8];
+            const thumbTip = landmarks[4];
+
+            cursor.x = (1 - indexFingerTip.x) * canvas.width;
+            cursor.y = indexFingerTip.y * canvas.height;
+
+            const dx = thumbTip.x - indexFingerTip.x;
+            const dy = thumbTip.y - indexFingerTip.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            cursor.pinching = distance < 0.08;
+        }
+    }
+
+    // เมาส์คอนโทรล
+    canvas.addEventListener('mousemove', (e) => { mouseX = e.clientX; mouseY = e.clientY; });
+    canvas.addEventListener('mousedown', () => { isMouseDown = true; });
+    canvas.addEventListener('mouseup', () => { isMouseDown = false; });
+    canvas.addEventListener('touchstart', (e) => { isMouseDown = true; mouseX = e.touches[0].clientX; mouseY = e.touches[0].clientY; e.preventDefault(); }, {passive: false});
+    canvas.addEventListener('touchmove', (e) => { mouseX = e.touches[0].clientX; mouseY = e.touches[0].clientY; e.preventDefault(); }, {passive: false});
+    canvas.addEventListener('touchend', () => { isMouseDown = false; });
+
+    function isCursorOver(obj) {
+        return cursor.x >= obj.x && cursor.x <= obj.x + obj.w &&
+               cursor.y >= obj.y && cursor.y <= obj.y + obj.h;
+    }
+
+    function updateGameLogic() {
+        if (!handDetected || (Date.now() - lastHandTime > 1000)) {
+            handDetected = false;
+            cursor.x += (mouseX - cursor.x) * 0.3;
+            cursor.y += (mouseY - cursor.y) * 0.3;
+            cursor.pinching = isMouseDown;
+        }
+
+        cursor.state = 'normal';
+
+        if (gameState === 'instructions') {
+            instructionBtn.x = canvas.width / 2 - instructionBtn.w / 2;
+            instructionBtn.y = canvas.height / 2 + 100;
+
+            if (isCursorOver(instructionBtn)) {
+                cursor.state = 'hover';
+                if (cursor.pinching && !cursor.wasPinching) {
+                    playSfxCorrect();
+                    gameState = 'playing';
+                    score = 0;
+                    setupLevel(0);
+                }
+            }
+        } 
+        else if (gameState === 'playing') {
+            
+            // --- ระบบนับถอยหลัง ---
+            if (levelTransitionTimer === 0) { 
+                let now = Date.now();
+                if (now - lastFrameTimeMs >= 1000) {
+                    timeLeft--;
+                    lastFrameTimeMs += 1000;
+                    if (timeLeft <= 10 && timeLeft > 0) playSfxTick();
+                }
+                
+                if (timeLeft <= 0) {
+                    gameState = 'time_out';
+                    playSfxGameOver();
+                    draggedCard = null;
+                }
+            }
+
+            // อัปเดตการ์ด
+            cards.forEach(card => {
+                card.scale += (card.targetScale - card.scale) * 0.2;
+                if (card.shakeTimer > 0) card.shakeTimer--;
+
+                if (!card.isPlaced) {
+                    if (isCursorOver(card) && !draggedCard && levelTransitionTimer === 0) {
+                        cursor.state = 'hover';
+                        if (cursor.pinching && !cursor.wasPinching) {
+                            draggedCard = card;
+                            card.targetScale = card.baseScale * 1.2; 
+                            playSfxGrab();
+                        }
+                    }
+                }
+            });
+
+            if (draggedCard) {
+                cursor.state = 'grabbed';
+                draggedCard.x += (cursor.x - draggedCard.w / 2 - draggedCard.x) * 0.4;
+                draggedCard.y += (cursor.y - draggedCard.h / 2 - draggedCard.y) * 0.4;
+
+                if (!cursor.pinching && cursor.wasPinching) {
+                    let droppedInBox = false;
+
+                    for (let box of boxes) {
+                        const cardCenterX = draggedCard.x + draggedCard.w / 2;
+                        const cardCenterY = draggedCard.y + draggedCard.h / 2;
+                        
+                        if (cardCenterX >= box.x && cardCenterX <= box.x + box.w &&
+                            cardCenterY >= box.y && cardCenterY <= box.y + box.h) {
+                            
+                            droppedInBox = true;
+                            
+                            // ถ้าเป็นตัวที่ถูกต้องและตรงกล่อง
+                            if (!draggedCard.isDecoy && draggedCard.catId === box.id) {
+                                draggedCard.isPlaced = true;
+                                draggedCard.targetScale = 0; 
+                                box.containedAnimals.push(draggedCard.emoji);
+                                score += 50;
+                                playSfxCorrect();
+                            } else {
+                                // ผิดกล่อง หรือ เป็นตัวลวง!
+                                draggedCard.shakeTimer = 30;
+                                draggedCard.x = draggedCard.homeX;
+                                draggedCard.y = draggedCard.homeY;
+                                draggedCard.targetScale = draggedCard.baseScale;
+                                score = Math.max(0, score - 20); 
+                                playSfxWrong();
+                            }
+                            break;
+                        }
+                    }
+
+                    if (!droppedInBox) {
+                        draggedCard.x = draggedCard.homeX;
+                        draggedCard.y = draggedCard.homeY;
+                        draggedCard.targetScale = draggedCard.baseScale;
+                    }
+                    draggedCard = null;
+                }
+            }
+
+            if (cursor.pinching && cursor.state === 'normal' && !draggedCard) cursor.state = 'missed';
+
+            // เช็คจบด่าน: การ์ดที่ไม่ใช่ตัวลวงถูกจัดเรียงหมดแล้วหรือยัง?
+            const allCleared = cards.filter(c => !c.isDecoy).every(c => c.isPlaced === true);
+            if (allCleared && cards.length > 0) {
+                if (levelTransitionTimer === 0) {
+                    levelBonus = timeLeft * 10; // โบนัสเวลาที่เหลือ
+                    score += levelBonus;
+                    playSfxWin();
+                    
+                    // สั่งให้ตัวลวงที่เหลือบนจอหดหายไปตอนจบด่าน
+                    cards.forEach(c => c.targetScale = 0);
+                }
+                
+                levelTransitionTimer++;
+                if (levelTransitionTimer > 120) { 
+                    levelTransitionTimer = 0;
+                    setupLevel(currentLevel + 1);
+                }
+            }
+        }
+        else if (gameState === 'time_out') {
+            restartBtn.x = canvas.width / 2 - restartBtn.w / 2;
+            restartBtn.y = canvas.height / 2 + 100;
+
+            if (isCursorOver(restartBtn)) {
+                cursor.state = 'hover';
+                if (cursor.pinching && !cursor.wasPinching) {
+                    playSfxCorrect();
+                    gameState = 'playing';
+                    score = 0;
+                    setupLevel(0);
+                }
+            }
+        }
+
+        cursor.wasPinching = cursor.pinching;
+    }
+
+    function drawRoundRect(ctx, x, y, width, height, radius) {
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.lineTo(x + width - radius, y);
+        ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+        ctx.lineTo(x + width, y + height - radius);
+        ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+        ctx.lineTo(x + radius, y + height);
+        ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+        ctx.lineTo(x, y + radius);
+        ctx.quadraticCurveTo(x, y, x + radius, y);
+        ctx.closePath();
+    }
+
+    function drawLoop() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+            ctx.save();
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+            const aspect = video.videoWidth / video.videoHeight;
+            const cAspect = canvas.width / canvas.height;
+            let dW, dH, dX, dY;
+            if (cAspect > aspect) {
+                dW = canvas.width; dH = canvas.width / aspect; dX = 0; dY = (canvas.height - dH) / 2;
+            } else {
+                dH = canvas.height; dW = canvas.height * aspect; dY = 0; dX = (canvas.width - dW) / 2;
+            }
+            ctx.drawImage(video, dX, dY, dW, dH);
+            ctx.restore();
+        } else {
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        ctx.fillStyle = "rgba(15, 23, 42, 0.55)"; // ทำให้พื้นหลังเข้มขึ้นนิดหน่อย การ์ดเยอะจะได้มองง่าย
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        updateGameLogic();
+
+        if (!handDetected && gameState !== 'start' && gameState !== 'loading') {
+            ctx.fillStyle = "rgba(239, 68, 68, 0.9)";
+            ctx.fillRect(0, 0, canvas.width, 40);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 16px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("⚠️ ไม่พบมือในกล้อง สามารถใช้เมาส์คลิกและลากแทนได้", canvas.width / 2, 26);
+        }
+
+        if (gameState === 'instructions') drawInstructions();
+        else if (gameState === 'playing') drawGameplay();
+        else if (gameState === 'time_out') drawTimeOut();
+
+        if (gameState !== 'start' && gameState !== 'loading') drawCursorIndicator();
+
+        requestAnimationFrame(drawLoop);
+    }
+
+    function drawInstructions() {
+        const boxW = Math.min(650, canvas.width - 40);
+        const boxH = 460;
+        const boxX = (canvas.width - boxW) / 2;
+        const boxY = (canvas.height - boxH) / 2 - 40;
+
+        ctx.fillStyle = "rgba(15, 23, 42, 0.95)";
+        drawRoundRect(ctx, boxX, boxY, boxW, boxH, 24);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = "#10b981";
+        ctx.font = "bold 34px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("📦 กติกาจัดกล่องสัตว์", canvas.width / 2, boxY + 60);
+
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "20px sans-serif";
+        const descTexts = [
+            "เกมนี้มีสัตว์กว่า 300 ชนิด สุ่มโผล่มาท้าทายคุณ!",
+            "",
+            "1. ขยับนิ้วชี้ เล็งไปที่สัตว์ แล้ว 'จีบนิ้ว' เพื่อ หยิบ",
+            "2. ลากสัตว์ไปปล่อยในกล่องให้ถูกหมวดหมู่",
+            "3. ระวัง! มี 'ตัวลวง' ที่ไม่เข้าพวกโผล่มา",
+            "   (ห้ามหยิบใส่กล่อง ปล่อยมันทิ้งไว้บนจอ!)",
+            "4. มีเวลาจำกัด 60 วินาที ต่อด่าน!",
+            "   (เคลียร์ไวได้คะแนนโบนัสเวลาด้วยนะ)"
+        ];
+        for (let i = 0; i < descTexts.length; i++) {
+            ctx.fillStyle = (i >= 4 && i <= 5) ? "#fca5a5" : "#f8fafc"; 
+            if (i===7) ctx.fillStyle = "#fde047";
+            ctx.fillText(descTexts[i], canvas.width / 2, boxY + 120 + (i * 32));
+        }
+
+        const btn = instructionBtn;
+        ctx.fillStyle = cursor.state === 'hover' ? '#10b981' : '#059669';
+        drawRoundRect(ctx, btn.x, btn.y, btn.w, btn.h, 35);
+        ctx.fill();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 26px sans-serif";
+        ctx.fillText("ลุยเลย! (Pinch)", canvas.width / 2, btn.y + 45);
+    }
+
+    function drawGameplay() {
+        // 1. Dashboard
+        ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+        ctx.fillRect(0, 40, canvas.width, 100);
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+        ctx.beginPath(); ctx.moveTo(0, 140); ctx.lineTo(canvas.width, 140); ctx.stroke();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 26px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("ลากสัตว์ลงกล่อง (ปล่อยตัวลวงทิ้งไว้!)", canvas.width / 2, 75);
+
+        if (timeLeft <= 10) ctx.fillStyle = (Math.floor(Date.now() / 200) % 2 === 0) ? "#ef4444" : "#fca5a5";
+        else ctx.fillStyle = "#fbbf24";
+        
+        ctx.font = "bold 28px sans-serif";
+        ctx.fillText(`⏱️ ${timeLeft} วิ`, canvas.width / 2, 115);
+
+        ctx.fillStyle = "#10b981";
+        ctx.font = "bold 24px sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(`⭐ คะแนน: ${score}`, 30, 95);
+        ctx.textAlign = "right";
+        ctx.fillText(`ด่านที่: ${currentLevel + 1} 🚀`, canvas.width - 30, 95);
+
+        // 2. กล่อง
+        boxes.forEach(box => {
+            let isHovering = false;
+            if (draggedCard) {
+                const cX = draggedCard.x + draggedCard.w/2;
+                const cY = draggedCard.y + draggedCard.h/2;
+                if (cX >= box.x && cX <= box.x + box.w && cY >= box.y && cY <= box.y + box.h) {
+                    isHovering = true;
+                }
+            }
+
+            ctx.fillStyle = isHovering ? box.color : "rgba(30, 41, 59, 0.8)";
+            ctx.strokeStyle = box.color;
+            ctx.lineWidth = 4;
+            drawRoundRect(ctx, box.x, box.y, box.w, box.h, 20);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = "rgba(255,255,255,0.2)";
+            ctx.fillRect(box.x + box.w/2 - 20, box.y - 10, 40, 20);
+
+            ctx.fillStyle = isHovering ? "#ffffff" : box.color;
+            ctx.font = "bold 22px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(box.icon + " " + box.name, box.x + box.w / 2, box.y + 35);
+
+            ctx.font = "28px Arial";
+            box.containedAnimals.forEach((animalEmoji, idx) => {
+                const maxPerRow = Math.floor((box.w-20) / 35);
+                const row = Math.floor(idx / maxPerRow);
+                const col = idx % maxPerRow;
+                ctx.fillText(animalEmoji, box.x + 25 + (col * 35), box.y + 80 + (row * 35));
+            });
+        });
+
+        // 3. การ์ด (เรียงให้ใบที่หยิบอยู่บนสุด)
+        const sortedCards = [...cards].sort((a, b) => (a === draggedCard ? 1 : b === draggedCard ? -1 : 0));
+
+        sortedCards.forEach(card => {
+            if (card.scale <= 0.05) return; 
+
+            let shakeX = 0;
+            if (card.shakeTimer > 0) shakeX = Math.sin(card.shakeTimer * 2.5) * 12; 
+
+            const currentW = card.w * card.scale;
+            const currentH = card.h * card.scale;
+            const drawX = card.x + (card.w - currentW) / 2 + shakeX;
+            const drawY = card.y + (card.h - currentH) / 2;
+
+            ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+            drawRoundRect(ctx, drawX + 4, drawY + 8, currentW, currentH, 14);
+            ctx.fill();
+
+            if (draggedCard === card) ctx.fillStyle = "#fffbeb"; 
+            else if (card.shakeTimer > 0) ctx.fillStyle = "#fecaca"; 
+            else ctx.fillStyle = "#ffffff";
+
+            drawRoundRect(ctx, drawX, drawY, currentW, currentH, 14);
+            ctx.fill();
+            
+            ctx.strokeStyle = "#cbd5e1";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.font = `${Math.floor(55 * card.scale)}px Arial`;
+            ctx.textAlign = "center";
+            ctx.fillText(card.emoji, drawX + currentW / 2, drawY + currentH / 2 + 10);
+
+            ctx.fillStyle = "#0f172a";
+            ctx.font = `bold ${Math.floor(16 * card.scale)}px sans-serif`;
+            ctx.fillText(card.name, drawX + currentW / 2, drawY + currentH - 12);
+        });
+
+        // Effect จบด่าน
+        if (levelTransitionTimer > 0) {
+            ctx.fillStyle = "rgba(16, 185, 129, " + (levelTransitionTimer / 100) + ")"; 
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "white";
+            ctx.font = "bold 56px sans-serif";
+            ctx.textAlign = "center";
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = "black";
+            ctx.fillText("⭐ ผ่านด่านสำเร็จ! ⭐", canvas.width/2, canvas.height/2 - 20);
+            
+            ctx.fillStyle = "#fef08a";
+            ctx.font = "bold 32px sans-serif";
+            ctx.fillText(`+ โบนัสเวลา: ${levelBonus} คะแนน`, canvas.width/2, canvas.height/2 + 40);
+            ctx.shadowBlur = 0;
+        }
+    }
+
+    function drawTimeOut() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.95)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#ef4444"; 
+        ctx.font = "bold 70px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("⏰ หมดเวลา! ⏰", canvas.width / 2, canvas.height / 2 - 90);
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "28px sans-serif";
+        ctx.fillText(`คุณไปถึงด่านที่: ${currentLevel + 1}`, canvas.width / 2, canvas.height / 2 - 20);
+        
+        ctx.fillStyle = "#10b981";
+        ctx.font = "bold 45px sans-serif";
+        ctx.fillText(`คะแนนสะสม: ${score}`, canvas.width / 2, canvas.height / 2 + 40);
+
+        const btn = restartBtn;
+        ctx.fillStyle = cursor.state === 'hover' ? '#10b981' : '#059669';
+        drawRoundRect(ctx, btn.x, btn.y, btn.w, btn.h, 35);
+        ctx.fill();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 26px sans-serif";
+        ctx.fillText("เริ่มเล่นใหม่", canvas.width / 2, btn.y + 45);
+    }
+
+    function drawCursorIndicator() {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cursor.x, cursor.y, 20, 0, Math.PI * 2);
+
+        switch (cursor.state) {
+            case 'hover':
+                ctx.fillStyle = "rgba(234, 179, 8, 0.4)"; ctx.fill();
+                ctx.strokeStyle = "#eab308"; ctx.lineWidth = 4; ctx.setLineDash([6, 4]); ctx.stroke();
+                break;
+            case 'missed':
+                ctx.strokeStyle = "#ef4444"; ctx.lineWidth = 5; ctx.stroke();
+                break;
+            case 'grabbed':
+                ctx.fillStyle = "rgba(16, 185, 129, 0.4)"; ctx.fill();
+                ctx.strokeStyle = "#10b981"; ctx.lineWidth = 5; ctx.stroke();
+                break;
+            case 'normal':
+            default:
+                ctx.fillStyle = "rgba(56, 189, 248, 0.3)"; ctx.fill();
+                ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 3; ctx.stroke();
+                break;
+        }
+        
+        ctx.beginPath(); ctx.arc(cursor.x, cursor.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = "white"; ctx.fill();
+        ctx.restore();
+    }
+</script>
+
+</body>
+</html>
